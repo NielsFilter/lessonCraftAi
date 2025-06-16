@@ -1,6 +1,6 @@
 import os
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, TypedDict, Annotated
 from datetime import datetime
 import openai
 import google.generativeai as genai
@@ -10,10 +10,28 @@ from PIL import Image
 import io
 from bson import ObjectId
 
+from langgraph.graph import StateGraph, END
+from langgraph.prebuilt import ToolExecutor
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
+
 from .models import LessonPlanStatus, MessageSender
 
 # Initialize AI services
 embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+
+# Define the state for our LangGraph workflow
+class LessonPlanState(TypedDict):
+    messages: List[Any]
+    lesson_plan_data: Dict[str, Any]
+    context_docs: List[str]
+    current_step: str
+    outline: Optional[List[str]]
+    details: Optional[Dict[str, str]]
+    user_request: str
+    response: str
 
 class AIAgent:
     def __init__(self, user_api_keys: Dict[str, str]):
@@ -27,116 +45,323 @@ class AIAgent:
         if self.gemini_key:
             genai.configure(api_key=self.gemini_key)
             self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+            # Initialize LangChain Gemini model for LangGraph
+            self.llm = ChatGoogleGenerativeAI(
+                model="gemini-1.5-flash",
+                google_api_key=self.gemini_key,
+                temperature=0.7
+            )
+        
+        # Build the LangGraph workflow
+        self.workflow = self._build_workflow()
 
-    async def generate_lesson_outline(self, lesson_plan_data: Dict[str, Any], context_docs: List[str]) -> List[str]:
-        """Generate high-level lesson plan outline"""
-        context = "\n".join(context_docs) if context_docs else ""
+    def _build_workflow(self) -> StateGraph:
+        """Build the LangGraph workflow for lesson plan generation"""
         
-        prompt = f"""
-        Create a high-level outline for a lesson plan with the following details:
-        
-        Title: {lesson_plan_data.get('title')}
-        Subject: {lesson_plan_data.get('subject')}
-        Age Group: {lesson_plan_data.get('age_group')}
-        Description: {lesson_plan_data.get('description', '')}
-        
-        Context from uploaded documents:
-        {context}
-        
-        Please provide a structured outline with 5-8 main sections that would make an effective lesson plan.
-        Return only the outline points as a list, one per line, without numbering.
-        """
-        
-        try:
-            if self.gemini_key:
-                response = await self._generate_with_gemini(prompt)
-                outline = [line.strip() for line in response.split('\n') if line.strip()]
-                return outline[:8]  # Limit to 8 points
+        # Define tools
+        @tool
+        def analyze_request(user_input: str, lesson_status: str) -> str:
+            """Analyze user request to determine what action to take"""
+            user_input_lower = user_input.lower()
+            
+            if lesson_status == "draft" and any(keyword in user_input_lower for keyword in 
+                ["outline", "structure", "plan", "create", "generate", "start"]):
+                return "generate_outline"
+            elif lesson_status == "outline" and any(keyword in user_input_lower for keyword in 
+                ["details", "detailed", "content", "expand", "elaborate"]):
+                return "generate_details"
             else:
-                return [
-                    "Learning Objectives",
-                    "Materials and Resources",
-                    "Introduction and Warm-up",
-                    "Main Teaching Activity",
-                    "Practice and Application",
-                    "Assessment and Evaluation",
-                    "Conclusion and Wrap-up",
-                    "Extension Activities"
-                ]
-        except Exception as e:
-            print(f"Error generating outline: {e}")
-            return ["Error generating outline. Please try again."]
-
-    async def generate_lesson_details(self, lesson_plan_data: Dict[str, Any], outline: List[str], context_docs: List[str]) -> Dict[str, str]:
-        """Generate detailed content for each outline section"""
-        context = "\n".join(context_docs) if context_docs else ""
-        details = {}
+                return "general_chat"
         
-        for section in outline:
-            prompt = f"""
-            Create detailed content for the "{section}" section of a lesson plan with these details:
+        # Define workflow nodes
+        def route_request(state: LessonPlanState) -> LessonPlanState:
+            """Route the user request to appropriate handler"""
+            lesson_status = state["lesson_plan_data"].get("status", "draft")
+            action = analyze_request.invoke({
+                "user_input": state["user_request"],
+                "lesson_status": lesson_status
+            })
             
-            Title: {lesson_plan_data.get('title')}
-            Subject: {lesson_plan_data.get('subject')}
-            Age Group: {lesson_plan_data.get('age_group')}
+            state["current_step"] = action
+            return state
+        
+        def generate_outline_node(state: LessonPlanState) -> LessonPlanState:
+            """Generate lesson plan outline"""
+            lesson_data = state["lesson_plan_data"]
+            context = "\n".join(state["context_docs"]) if state["context_docs"] else ""
             
-            Context from uploaded documents:
-            {context}
-            
-            Provide comprehensive, practical content for this section that a teacher can directly use.
-            Include specific activities, timing, and resources where appropriate.
-            """
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an expert educational AI assistant. Create a high-level outline for a lesson plan.
+                Return exactly 5-8 main sections as a numbered list, one per line.
+                Focus on practical, actionable sections that teachers can use directly."""),
+                ("human", """Create an outline for this lesson plan:
+                
+                Title: {title}
+                Subject: {subject}
+                Age Group: {age_group}
+                Description: {description}
+                
+                Context from uploaded documents:
+                {context}
+                
+                Provide a structured outline with 5-8 main sections.""")
+            ])
             
             try:
                 if self.gemini_key:
-                    details[section] = await self._generate_with_gemini(prompt)
+                    chain = prompt | self.llm
+                    response = chain.invoke({
+                        "title": lesson_data.get('title', ''),
+                        "subject": lesson_data.get('subject', ''),
+                        "age_group": lesson_data.get('age_group', ''),
+                        "description": lesson_data.get('description', ''),
+                        "context": context
+                    })
+                    
+                    # Parse outline from response
+                    outline_text = response.content
+                    outline = []
+                    for line in outline_text.split('\n'):
+                        line = line.strip()
+                        if line and (line[0].isdigit() or line.startswith('-') or line.startswith('•')):
+                            # Remove numbering and clean up
+                            clean_line = line.split('.', 1)[-1].strip() if '.' in line else line.strip('- •').strip()
+                            if clean_line:
+                                outline.append(clean_line)
+                    
+                    state["outline"] = outline[:8]  # Limit to 8 points
+                    
+                    response_text = f"I've created a comprehensive outline for your lesson plan:\n\n"
+                    for i, point in enumerate(outline[:8], 1):
+                        response_text += f"{i}. {point}\n"
+                    response_text += "\nWould you like me to generate detailed content for each section?"
+                    
+                    state["response"] = response_text
                 else:
-                    details[section] = f"Detailed content for {section} would be generated here using the configured AI model."
+                    default_outline = [
+                        "Learning Objectives",
+                        "Materials and Resources", 
+                        "Introduction and Warm-up",
+                        "Main Teaching Activity",
+                        "Practice and Application",
+                        "Assessment and Evaluation",
+                        "Conclusion and Wrap-up",
+                        "Extension Activities"
+                    ]
+                    state["outline"] = default_outline
+                    state["response"] = "I've created a standard lesson plan outline. Please configure your API keys for AI-generated content."
+                    
             except Exception as e:
-                print(f"Error generating details for {section}: {e}")
-                details[section] = f"Error generating content for {section}. Please try again."
+                print(f"Error generating outline: {e}")
+                state["response"] = "Error generating outline. Please try again."
+                
+            return state
         
-        return details
+        def generate_details_node(state: LessonPlanState) -> LessonPlanState:
+            """Generate detailed content for each outline section"""
+            lesson_data = state["lesson_plan_data"]
+            outline = state.get("outline", [])
+            context = "\n".join(state["context_docs"]) if state["context_docs"] else ""
+            details = {}
+            
+            if not outline:
+                state["response"] = "I need to create an outline first before generating detailed content."
+                return state
+            
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an expert educational AI assistant. Create detailed, practical content for lesson plan sections.
+                Provide comprehensive content that teachers can use directly in their classrooms.
+                Include specific activities, timing, resources, and implementation details."""),
+                ("human", """Create detailed content for the "{section}" section of this lesson plan:
+                
+                Title: {title}
+                Subject: {subject}
+                Age Group: {age_group}
+                
+                Context from uploaded documents:
+                {context}
+                
+                Provide comprehensive, practical content for this section.""")
+            ])
+            
+            try:
+                if self.gemini_key:
+                    chain = prompt | self.llm
+                    
+                    for section in outline:
+                        response = chain.invoke({
+                            "section": section,
+                            "title": lesson_data.get('title', ''),
+                            "subject": lesson_data.get('subject', ''),
+                            "age_group": lesson_data.get('age_group', ''),
+                            "context": context
+                        })
+                        details[section] = response.content
+                else:
+                    for section in outline:
+                        details[section] = f"Detailed content for {section} would be generated here using the configured AI model."
+                        
+                state["details"] = details
+                state["response"] = "I've generated detailed content for each section of your lesson plan! You can now review and modify any section as needed. The lesson plan is ready for use in your classroom."
+                
+            except Exception as e:
+                print(f"Error generating details: {e}")
+                state["response"] = "Error generating detailed content. Please try again."
+                
+            return state
+        
+        def general_chat_node(state: LessonPlanState) -> LessonPlanState:
+            """Handle general chat about the lesson plan"""
+            lesson_data = state["lesson_plan_data"]
+            context = "\n".join(state["context_docs"]) if state["context_docs"] else ""
+            user_message = state["user_request"]
+            
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", """You are an expert educational AI assistant helping teachers create lesson plans.
+                Provide helpful, professional responses that assist with lesson plan creation.
+                Be specific and practical in your suggestions."""),
+                ("human", """Current lesson plan context:
+                Title: {title}
+                Subject: {subject}
+                Age Group: {age_group}
+                Status: {status}
+                
+                Context from uploaded documents:
+                {context}
+                
+                Teacher's message: {message}
+                
+                Provide a helpful response.""")
+            ])
+            
+            try:
+                if self.gemini_key:
+                    chain = prompt | self.llm
+                    response = chain.invoke({
+                        "title": lesson_data.get('title', ''),
+                        "subject": lesson_data.get('subject', ''),
+                        "age_group": lesson_data.get('age_group', ''),
+                        "status": lesson_data.get('status', ''),
+                        "context": context,
+                        "message": user_message
+                    })
+                    state["response"] = response.content
+                else:
+                    state["response"] = "I'd be happy to help you with your lesson plan! Please configure your AI API keys in your profile to enable full AI assistance."
+                    
+            except Exception as e:
+                print(f"Error generating chat response: {e}")
+                state["response"] = "I'm sorry, I encountered an error while processing your request. Please try again."
+                
+            return state
+        
+        # Build the graph
+        workflow = StateGraph(LessonPlanState)
+        
+        # Add nodes
+        workflow.add_node("route_request", route_request)
+        workflow.add_node("generate_outline", generate_outline_node)
+        workflow.add_node("generate_details", generate_details_node)
+        workflow.add_node("general_chat", general_chat_node)
+        
+        # Add edges
+        workflow.set_entry_point("route_request")
+        
+        # Conditional routing based on current_step
+        def route_to_handler(state: LessonPlanState) -> str:
+            step = state.get("current_step", "general_chat")
+            if step == "generate_outline":
+                return "generate_outline"
+            elif step == "generate_details":
+                return "generate_details"
+            else:
+                return "general_chat"
+        
+        workflow.add_conditional_edges(
+            "route_request",
+            route_to_handler,
+            {
+                "generate_outline": "generate_outline",
+                "generate_details": "generate_details", 
+                "general_chat": "general_chat"
+            }
+        )
+        
+        # All nodes end the workflow
+        workflow.add_edge("generate_outline", END)
+        workflow.add_edge("generate_details", END)
+        workflow.add_edge("general_chat", END)
+        
+        return workflow.compile()
+
+    async def generate_lesson_outline(self, lesson_plan_data: Dict[str, Any], context_docs: List[str]) -> List[str]:
+        """Generate high-level lesson plan outline using LangGraph"""
+        initial_state = LessonPlanState(
+            messages=[],
+            lesson_plan_data=lesson_plan_data,
+            context_docs=context_docs,
+            current_step="generate_outline",
+            outline=None,
+            details=None,
+            user_request="create outline",
+            response=""
+        )
+        
+        try:
+            result = await asyncio.to_thread(self.workflow.invoke, initial_state)
+            return result.get("outline", [])
+        except Exception as e:
+            print(f"Error in LangGraph outline generation: {e}")
+            return [
+                "Learning Objectives",
+                "Materials and Resources",
+                "Introduction and Warm-up", 
+                "Main Teaching Activity",
+                "Practice and Application",
+                "Assessment and Evaluation",
+                "Conclusion and Wrap-up",
+                "Extension Activities"
+            ]
+
+    async def generate_lesson_details(self, lesson_plan_data: Dict[str, Any], outline: List[str], context_docs: List[str]) -> Dict[str, str]:
+        """Generate detailed content for each outline section using LangGraph"""
+        initial_state = LessonPlanState(
+            messages=[],
+            lesson_plan_data=lesson_plan_data,
+            context_docs=context_docs,
+            current_step="generate_details",
+            outline=outline,
+            details=None,
+            user_request="generate details",
+            response=""
+        )
+        
+        try:
+            result = await asyncio.to_thread(self.workflow.invoke, initial_state)
+            return result.get("details", {})
+        except Exception as e:
+            print(f"Error in LangGraph details generation: {e}")
+            return {section: f"Error generating content for {section}. Please try again." for section in outline}
 
     async def generate_chat_response(self, message: str, lesson_plan_data: Dict[str, Any], context_docs: List[str]) -> str:
-        """Generate AI response for chat messages"""
-        context = "\n".join(context_docs) if context_docs else ""
-        
-        prompt = f"""
-        You are an AI assistant helping teachers create lesson plans. 
-        
-        Current lesson plan context:
-        Title: {lesson_plan_data.get('title')}
-        Subject: {lesson_plan_data.get('subject')}
-        Age Group: {lesson_plan_data.get('age_group')}
-        Status: {lesson_plan_data.get('status')}
-        
-        Context from uploaded documents:
-        {context}
-        
-        Teacher's message: {message}
-        
-        Provide a helpful, professional response that assists with lesson plan creation.
-        Be specific and practical in your suggestions.
-        """
+        """Generate AI response for chat messages using LangGraph"""
+        initial_state = LessonPlanState(
+            messages=[],
+            lesson_plan_data=lesson_plan_data,
+            context_docs=context_docs,
+            current_step="",
+            outline=lesson_plan_data.get("outline"),
+            details=lesson_plan_data.get("details"),
+            user_request=message,
+            response=""
+        )
         
         try:
-            if self.gemini_key:
-                return await self._generate_with_gemini(prompt)
-            else:
-                return "I'd be happy to help you with your lesson plan! Please configure your AI API keys in your profile to enable full AI assistance."
+            result = await asyncio.to_thread(self.workflow.invoke, initial_state)
+            return result.get("response", "I'm sorry, I couldn't process your request.")
         except Exception as e:
-            print(f"Error generating chat response: {e}")
+            print(f"Error in LangGraph chat response: {e}")
             return "I'm sorry, I encountered an error while processing your request. Please try again."
-
-    async def _generate_with_gemini(self, prompt: str) -> str:
-        """Generate response using Gemini model"""
-        try:
-            response = self.gemini_model.generate_content(prompt)
-            return response.text
-        except Exception as e:
-            print(f"Gemini API error: {e}")
-            raise
 
     async def generate_song(self, prompt: str) -> Dict[str, Any]:
         """Generate song using Suno AI (placeholder implementation)"""
