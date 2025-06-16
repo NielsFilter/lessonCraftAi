@@ -51,11 +51,12 @@ async def send_message(
     
     user_msg_result = await db.messages.insert_one(user_message)
     
-    # Get relevant context from uploaded documents
+    # Get relevant context from uploaded documents using OpenAI embeddings
     context_docs = await get_relevant_context(
         chat_request.lesson_plan_id, 
         chat_request.message, 
-        db
+        db,
+        openai_api_key=api_keys.get("openai")
     )
     
     # Initialize AI agent

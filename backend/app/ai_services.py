@@ -4,11 +4,11 @@ from typing import List, Dict, Any, Optional, TypedDict, Annotated
 from datetime import datetime
 import openai
 import google.generativeai as genai
-from sentence_transformers import SentenceTransformer
 import PyPDF2
 from PIL import Image
 import io
 from bson import ObjectId
+import numpy as np
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolExecutor
@@ -18,9 +18,6 @@ from langchain_core.tools import tool
 from langchain_core.prompts import ChatPromptTemplate
 
 from .models import LessonPlanStatus, MessageSender
-
-# Initialize AI services
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Define the state for our LangGraph workflow
 class LessonPlanState(TypedDict):
@@ -33,14 +30,56 @@ class LessonPlanState(TypedDict):
     user_request: str
     response: str
 
+class EmbeddingService:
+    """Service for generating embeddings using OpenAI's text-embedding-3-small model"""
+    
+    def __init__(self, openai_api_key: str):
+        self.client = openai.OpenAI(api_key=openai_api_key)
+        self.model = "text-embedding-3-small"
+        self.dimension = 1536  # text-embedding-3-small produces 1536-dimensional embeddings
+    
+    async def generate_embedding(self, text: str) -> List[float]:
+        """Generate embedding for a single text"""
+        try:
+            response = await asyncio.to_thread(
+                self.client.embeddings.create,
+                model=self.model,
+                input=text,
+                encoding_format="float"
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            # Return zero vector as fallback
+            return [0.0] * self.dimension
+    
+    async def generate_embeddings_batch(self, texts: List[str]) -> List[List[float]]:
+        """Generate embeddings for multiple texts in batch"""
+        try:
+            response = await asyncio.to_thread(
+                self.client.embeddings.create,
+                model=self.model,
+                input=texts,
+                encoding_format="float"
+            )
+            return [data.embedding for data in response.data]
+        except Exception as e:
+            print(f"Error generating batch embeddings: {e}")
+            # Return zero vectors as fallback
+            return [[0.0] * self.dimension for _ in texts]
+
 class AIAgent:
     def __init__(self, user_api_keys: Dict[str, str]):
         self.openai_key = user_api_keys.get("openai")
         self.gemini_key = user_api_keys.get("gemini")
         self.suno_key = user_api_keys.get("sunoai")
         
+        # Initialize OpenAI client and embedding service
         if self.openai_key:
             openai.api_key = self.openai_key
+            self.embedding_service = EmbeddingService(self.openai_key)
+        else:
+            self.embedding_service = None
         
         if self.gemini_key:
             genai.configure(api_key=self.gemini_key)
@@ -386,9 +425,10 @@ async def process_uploaded_file(
     file_path: str,
     content_type: str,
     lesson_plan_id: Optional[ObjectId],
-    db
+    db,
+    openai_api_key: Optional[str] = None
 ):
-    """Process uploaded file and create embeddings"""
+    """Process uploaded file and create embeddings using OpenAI"""
     try:
         # Extract text from file
         text_content = await extract_text_from_file(file_path, content_type)
@@ -400,11 +440,17 @@ async def process_uploaded_file(
         # Chunk text
         chunks = chunk_text(text_content)
         
-        # Generate embeddings
+        # Generate embeddings using OpenAI
+        if openai_api_key:
+            embedding_service = EmbeddingService(openai_api_key)
+            embeddings = await embedding_service.generate_embeddings_batch(chunks)
+        else:
+            print("No OpenAI API key provided, skipping embedding generation")
+            return
+        
+        # Create embedding documents
         embeddings_docs = []
-        for i, chunk in enumerate(chunks):
-            embedding = embedding_model.encode(chunk).tolist()
-            
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
             embedding_doc = {
                 "file_id": file_id,
                 "lesson_plan_id": lesson_plan_id,
@@ -413,7 +459,9 @@ async def process_uploaded_file(
                 "metadata": {
                     "chunk_index": i,
                     "file_path": file_path,
-                    "content_type": content_type
+                    "content_type": content_type,
+                    "embedding_model": "text-embedding-3-small",
+                    "embedding_dimension": len(embedding)
                 },
                 "created_at": datetime.utcnow()
             }
@@ -429,7 +477,7 @@ async def process_uploaded_file(
             {"$set": {"processed": True}}
         )
         
-        print(f"Successfully processed file {file_id} with {len(embeddings_docs)} chunks")
+        print(f"Successfully processed file {file_id} with {len(embeddings_docs)} chunks using OpenAI embeddings")
         
     except Exception as e:
         print(f"Error processing file {file_id}: {e}")
@@ -499,25 +547,52 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[st
     
     return chunks
 
-async def get_relevant_context(lesson_plan_id: ObjectId, query: str, db, limit: int = 5) -> List[str]:
+def cosine_similarity(a: List[float], b: List[float]) -> float:
+    """Calculate cosine similarity between two vectors"""
+    try:
+        a_np = np.array(a)
+        b_np = np.array(b)
+        
+        dot_product = np.dot(a_np, b_np)
+        norm_a = np.linalg.norm(a_np)
+        norm_b = np.linalg.norm(b_np)
+        
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+        
+        return dot_product / (norm_a * norm_b)
+    except Exception as e:
+        print(f"Error calculating cosine similarity: {e}")
+        return 0.0
+
+async def get_relevant_context(
+    lesson_plan_id: ObjectId, 
+    query: str, 
+    db, 
+    openai_api_key: Optional[str] = None,
+    limit: int = 5
+) -> List[str]:
     """Get relevant document chunks for a query using vector similarity"""
     try:
-        # Generate query embedding
-        query_embedding = embedding_model.encode(query).tolist()
+        if not openai_api_key:
+            print("No OpenAI API key provided for context retrieval")
+            return []
         
-        # In a real implementation, you would use MongoDB's vector search
-        # For now, we'll get all embeddings for the lesson plan and do simple similarity
+        # Generate query embedding
+        embedding_service = EmbeddingService(openai_api_key)
+        query_embedding = await embedding_service.generate_embedding(query)
+        
+        # Get all embeddings for the lesson plan
         cursor = db.embeddings.find({"lesson_plan_id": lesson_plan_id})
         embeddings = await cursor.to_list(length=None)
         
         if not embeddings:
             return []
         
-        # Calculate similarities (simplified)
+        # Calculate similarities using cosine similarity
         similarities = []
         for emb_doc in embeddings:
-            # Simple dot product similarity (in real app, use cosine similarity)
-            similarity = sum(a * b for a, b in zip(query_embedding, emb_doc["embedding"]))
+            similarity = cosine_similarity(query_embedding, emb_doc["embedding"])
             similarities.append((similarity, emb_doc["chunk_text"]))
         
         # Sort by similarity and return top chunks

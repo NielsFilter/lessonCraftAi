@@ -90,6 +90,10 @@ async def upload_file(
     result = await db.files.insert_one(file_doc)
     file_doc["_id"] = result.inserted_id
     
+    # Get user's OpenAI API key for embedding generation
+    user_doc = await db.users.find_one({"_id": current_user.id})
+    openai_api_key = user_doc.get("api_keys", {}).get("openai")
+    
     # Process file asynchronously (in a real app, you'd use a task queue)
     try:
         await process_uploaded_file(
@@ -97,7 +101,8 @@ async def upload_file(
             file_path=file_path,
             content_type=file.content_type,
             lesson_plan_id=lesson_plan_obj_id,
-            db=db
+            db=db,
+            openai_api_key=openai_api_key
         )
     except Exception as e:
         print(f"Error processing file: {e}")
