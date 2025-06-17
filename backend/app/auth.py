@@ -61,8 +61,8 @@ async def get_current_user(
 async def verify_google_jwt(token: str) -> dict:
     """Verify Google JWT token and return user info"""
     try:
-        # First, try to verify with Google's tokeninfo endpoint
-        if GOOGLE_CLIENT_ID and not token.startswith('eyJ'):  # Real Google JWT tokens start with 'eyJ'
+        # Verify with Google's tokeninfo endpoint
+        if GOOGLE_CLIENT_ID:
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     f"https://oauth2.googleapis.com/tokeninfo?id_token={token}"
@@ -88,56 +88,17 @@ async def verify_google_jwt(token: str) -> dict:
                         detail="Invalid Google token"
                     )
         else:
-            # Fallback: decode JWT manually (for demo/development)
-            try:
-                # For Google JWT tokens, decode without verification for demo
-                if token.startswith('eyJ'):
-                    # Real Google JWT - decode the payload
-                    parts = token.split('.')
-                    if len(parts) >= 2:
-                        # Decode the payload (second part)
-                        payload = parts[1]
-                        # Add padding if needed
-                        payload += '=' * (4 - len(payload) % 4)
-                        decoded_payload = base64.urlsafe_b64decode(payload)
-                        user_info = json.loads(decoded_payload)
-                        
-                        return {
-                            'email': user_info.get('email', 'demo@example.com'),
-                            'name': user_info.get('name', 'Demo User'),
-                            'picture': user_info.get('picture', 'https://images.pexels.com/photos/3760263/pexels-photo-3760263.jpeg?auto=compress&cs=tinysrgb&w=400'),
-                            'id': user_info.get('sub', 'demo-user-id')
-                        }
-                else:
-                    # Base64 encoded demo data
-                    decoded_data = base64.b64decode(token).decode('utf-8')
-                    user_info = json.loads(decoded_data)
-                    
-                    return {
-                        'email': user_info.get('email', 'demo@example.com'),
-                        'name': user_info.get('name', 'Demo User'),
-                        'picture': user_info.get('picture', 'https://images.pexels.com/photos/3760263/pexels-photo-3760263.jpeg?auto=compress&cs=tinysrgb&w=400'),
-                        'id': user_info.get('sub', 'demo-user-id')
-                    }
-            except Exception as e:
-                print(f"Error decoding token: {e}")
-                # Return demo user as fallback
-                return {
-                    'email': 'demo@example.com',
-                    'name': 'Demo User',
-                    'picture': 'https://images.pexels.com/photos/3760263/pexels-photo-3760263.jpeg?auto=compress&cs=tinysrgb&w=400',
-                    'id': 'demo-user-id'
-                }
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Google Client ID not configured"
+            )
                 
     except httpx.RequestError as e:
         print(f"Network error verifying Google token: {e}")
-        # Fallback to demo user for network issues
-        return {
-            'email': 'demo@example.com',
-            'name': 'Demo User',
-            'picture': 'https://images.pexels.com/photos/3760263/pexels-photo-3760263.jpeg?auto=compress&cs=tinysrgb&w=400',
-            'id': 'demo-user-id'
-        }
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify Google token"
+        )
     except Exception as e:
         print(f"Error verifying Google token: {e}")
         raise HTTPException(
@@ -187,6 +148,8 @@ async def google_auth(
         
         return {"access_token": access_token, "token_type": "bearer"}
         
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Authentication error: {e}")
         raise HTTPException(
