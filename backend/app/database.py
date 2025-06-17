@@ -1,6 +1,5 @@
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
-from pymongo.server_api import ServerApi
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,10 +19,7 @@ async def init_db():
     if not mongodb_url:
         raise ValueError("MONGODB_URL environment variable is required")
     
-    db.client = AsyncIOMotorClient(
-        mongodb_url,
-        server_api=ServerApi('1')
-    )
+    db.client = AsyncIOMotorClient(mongodb_url)
     
     # Test connection
     try:
