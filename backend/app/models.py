@@ -16,8 +16,11 @@ class PyObjectId(ObjectId):
         return ObjectId(v)
 
     @classmethod
-    def __modify_schema__(cls, field_schema):
-        field_schema.update(type="string")
+    def __get_pydantic_json_schema__(cls, core_schema, handler):
+        # Pydantic v2: replace __modify_schema__
+        json_schema = handler(core_schema)
+        json_schema.update(type="string")
+        return json_schema
 
 # User Models
 class UserBase(BaseModel):
@@ -42,7 +45,7 @@ class User(UserBase):
     updated_at: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # pydantic v2 replacement for allow_population_by_field_name
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
@@ -92,7 +95,7 @@ class LessonPlan(LessonPlanBase):
     updated_at: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # pydantic v2 replacement for allow_population_by_field_name
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
@@ -115,7 +118,7 @@ class Message(MessageBase):
     timestamp: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # pydantic v2 replacement for allow_population_by_field_name
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
@@ -138,7 +141,7 @@ class FileDocument(FileBase):
     created_at: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # pydantic v2 replacement for allow_population_by_field_name
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
@@ -153,7 +156,7 @@ class EmbeddingDocument(BaseModel):
     created_at: datetime
 
     class Config:
-        allow_population_by_field_name = True
+        populate_by_name = True  # pydantic v2 replacement for allow_population_by_field_name
         arbitrary_types_allowed = True
         json_encoders = {ObjectId: str}
 
