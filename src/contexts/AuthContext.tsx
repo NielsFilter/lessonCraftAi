@@ -57,9 +57,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const login = async (googleToken: string) => {
+  const login = async (googleJWT: string) => {
     try {
-      await apiService.googleAuth(googleToken);
+      // Send the Google JWT token to our backend
+      await apiService.googleAuth(googleJWT);
       await getCurrentUser();
     } catch (error) {
       console.error('Login failed:', error);
