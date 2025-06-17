@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { GoogleLogin, GoogleOAuthProvider } from '@google-oauth/react';
+import { GoogleLogin, GoogleOAuthProvider } from '@react-oauth/google';
 import { useAuth } from '../contexts/AuthContext';
 import { GraduationCap, Loader2, AlertCircle } from 'lucide-react';
 
@@ -11,6 +11,7 @@ export const LoginPage: React.FC = () => {
   const navigate = useNavigate();
 
   const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID;
+  console.log('Google Client ID:', googleClientId);
 
   const handleGoogleSuccess = async (credentialResponse: any) => {
     setIsLoading(true);
