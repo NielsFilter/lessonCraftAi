@@ -29,7 +29,6 @@ class UserBase(BaseModel):
     avatar: Optional[str] = None
 
 class UserCreate(UserBase):
-    password: Optional[str] = None
     google_id: Optional[str] = None
 
 class UserUpdate(BaseModel):

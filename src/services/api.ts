@@ -39,7 +39,7 @@ class ApiService {
     localStorage.removeItem('access_token');
   }
 
-  // Authentication
+  // Authentication - Google Only
   async googleAuth(token: string) {
     const response = await fetch(`${API_BASE_URL}/auth/google`, {
       method: 'POST',
