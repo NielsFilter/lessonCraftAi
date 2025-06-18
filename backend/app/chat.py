@@ -178,6 +178,7 @@ async def get_chat_messages(
     
     messages = await cursor.to_list(length=None)
     
+    # Convert _id to id for each message
     return [
         {
             "id": str(msg["_id"]),

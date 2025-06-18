@@ -11,7 +11,7 @@ router = APIRouter()
 @router.get("/profile", response_model=User)
 async def get_user_profile(current_user: User = Depends(get_current_user)):
     """Get user profile information"""
-    return current_user
+    return current_user.model_dump(by_alias=True)
 
 @router.put("/profile", response_model=User)
 async def update_user_profile(
@@ -30,7 +30,7 @@ async def update_user_profile(
     
     # Return updated user
     updated_user_doc = await db.users.find_one({"_id": current_user.id})
-    return User(**updated_user_doc)
+    return User(**updated_user_doc).model_dump(by_alias=True)
 
 @router.put("/api-keys")
 async def update_api_keys(

@@ -131,6 +131,7 @@ async def get_user_files(
     cursor = db.files.find(query).sort("created_at", -1)
     files = await cursor.to_list(length=None)
     
+    # Convert _id to id for each file
     return [
         {
             "id": str(file_doc["_id"]),

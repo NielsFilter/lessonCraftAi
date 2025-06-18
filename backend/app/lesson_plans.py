@@ -32,7 +32,7 @@ async def create_lesson_plan(
     
     return LessonPlan(**lesson_plan_doc)
 
-@router.get("/", response_model=List[LessonPlan])
+@router.get("/")
 async def get_lesson_plans(
     status: Optional[LessonPlanStatus] = Query(None),
     subject: Optional[str] = Query(None),
@@ -52,7 +52,8 @@ async def get_lesson_plans(
     cursor = db.lesson_plans.find(query).sort("created_at", -1).skip(skip).limit(limit)
     lesson_plans = await cursor.to_list(length=limit)
     
-    return [LessonPlan(**doc) for doc in lesson_plans]
+    # Return as dicts with id, never _id
+    return [LessonPlan(**doc).model_dump(by_alias=True) for doc in lesson_plans]
 
 @router.get("/{lesson_plan_id}", response_model=LessonPlan)
 async def get_lesson_plan(
@@ -72,7 +73,7 @@ async def get_lesson_plan(
     if not lesson_plan_doc:
         raise HTTPException(status_code=404, detail="Lesson plan not found")
     
-    return LessonPlan(**lesson_plan_doc)
+    return LessonPlan(**lesson_plan_doc).model_dump(by_alias=True)
 
 @router.put("/{lesson_plan_id}", response_model=LessonPlan)
 async def update_lesson_plan(
@@ -105,7 +106,7 @@ async def update_lesson_plan(
     
     # Return updated lesson plan
     updated_doc = await db.lesson_plans.find_one({"_id": ObjectId(lesson_plan_id)})
-    return LessonPlan(**updated_doc)
+    return LessonPlan(**updated_doc).model_dump(by_alias=True)
 
 @router.delete("/{lesson_plan_id}")
 async def delete_lesson_plan(
